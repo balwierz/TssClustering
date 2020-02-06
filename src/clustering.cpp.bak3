@@ -1,0 +1,676 @@
+//============================================================================
+// Name        : clustering.cpp
+// Author      : 
+// Version     :
+// Copyright   : Your copyright notice
+// Description : it shoule be run for each chr-strand combination separately
+//					for speedups
+//============================================================================
+#include <fstream>
+#include <iostream>
+#include <list>
+#include <boost/unordered_map.hpp>
+#include <boost/unordered_set.hpp>
+#include <boost/foreach.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/array.hpp>
+#include "updateable_heap.cpp"
+
+using namespace std;
+namespace fs = boost::filesystem;
+typedef boost::unordered_set<std::string> setT;
+typedef uint32_t tscKeyT;
+
+struct expression
+{
+	double raw;  // could be int, but then we have a conversion each time...
+	double norm;
+	expression(double r, double n) : raw(r), norm(n) {}
+	expression(const expression& org) // maybe remove for speed ups
+	{
+		raw = org.raw;
+		norm = org.norm;
+	}
+	expression()
+	{
+		raw = 0;
+		norm = 0;
+	}
+	inline void operator += (const expression &other)
+	{
+		raw += other.raw;
+		norm += other.norm;
+	}
+};
+typedef boost::unordered_map<std::string, expression> exprHashT; //key is a sample
+struct TSC
+{
+	uint32_t repr;
+	uint32_t beg;
+	uint32_t end;
+	exprHashT expr; // hey is a sample
+	TSC()
+	{
+		//cerr << "constr:TSC\n";
+	}
+	void operator+=(const TSC&);
+};
+typedef boost::unordered_map<tscKeyT, TSC> tscHashT; // key is a TSC ID. // in principle could be int
+
+void TSC::operator +=(const TSC& other)
+{
+	//cerr << "fusing (" << beg << "," << end << ") (" << other.beg << "," << other.end << ")\n";
+	end = other.end;
+	repr = 0; // FIXME
+	BOOST_FOREACH(exprHashT::value_type val, other.expr)
+	{
+		expr[val.first] += val.second; // tested: it works even if the key didn't exist. unkn as zero.
+	}
+}
+
+ofstream& operator<<(ofstream &str, TSC* ptr)
+{
+	str << ptr->beg << "\t" << ptr->end << '\t' << (ptr->end - ptr->beg + 1) << '\n';
+	return str;
+}
+
+double altprofprob(list<TSC*>::iterator it);
+//double altprofprob(TSC* segone, TSC* segtwo);
+double priorprob(list<TSC*>::iterator it);
+//double priorprob(TSC *segone, TSC *segtwo);
+double priorprobEmpirical(TSC *segone, TSC *segtwo);
+void printClusters(list<TSC*> &result, char* fileName);
+
+string exprDirSplit ("/import/bc2/home/nimwegen/GROUP/Promoterome/ResultsHuman/NormalizedSplit/");
+string mappedDir ("/import/bc2/home/nimwegen/GROUP/Promoterome/ResultsHuman/Mapped/");
+
+const int maxSamples = 1024;
+const double normPseudocount = 0.5; // in tpms
+
+int cmpInt (const void * a, const void * b)
+{
+  return ( *(int*)a - *(int*)b );
+}
+int nSamples;
+boost::array<string,maxSamples> samples;
+boost::array<double,maxSamples> total;
+
+/********** CLUSTERING PARAMETERS ***********/
+double sigmasq = 0.0169;  // noise size
+double alpha = 3.1;    // gaussian prior size for TSS variance
+double lenscale = 10; // coexpression prior scale depending on the distance
+
+
+int main(int argc, char* argv[]) // argv[1] - which chrStr to do
+{
+//	boost::unordered_map<int, string> dupa;
+//	dupa[5] = "werwer";
+//	cout << dupa[5] << endl;
+//	//cout << dupa[7] << endl;
+//	dupa[7] += ".eeee";
+//	cout << dupa[7] << endl;
+//	return 0;
+
+	updateable_heap<double> h;
+	for(int i=0; i<100; i++)
+	{
+		h.push(rand() % 1000);
+	}
+	cout << h;
+//	h.push(7.1);
+//	cout << h;
+//	h.push(15.1);
+//	cout << h;
+//	h.push(16.1);
+//	cout << h;
+//	h.push(11.1);
+//	cout << h;
+//	h.push(5.1);
+//	cout << h;
+//	h.push(5.1);
+//	cout << h;
+	cout << "Messing up\n";
+	for(int i=0; i<1000; i++)
+	{
+
+		h.update((unsigned)i%100 + 1, rand() % 1000);
+	}
+	h.update((unsigned)1, 8.2);
+	h.update((unsigned)1, 9.1);
+	h.update((unsigned)6, 2.2);
+	h.update((unsigned)3, 4.2);
+	h.update((unsigned)5, 5.2);
+	h.update((unsigned)2, 10.2);
+	cout << h;
+	while(h.size())
+	{
+		cout << "aaa " << h.pop() << endl;
+	}
+	return 0;
+
+	// determine the number of samples
+	nSamples = 0;
+	fs::path normalizedPath( exprDirSplit + argv[1] + "/");
+	fs::directory_iterator end_iter;
+	tscHashT allTSCs;
+	for ( fs::directory_iterator dir_itr( normalizedPath ); dir_itr != end_iter; ++dir_itr )
+	{
+		if ( fs::is_regular_file( dir_itr->status() ) )
+		{
+			cerr << dir_itr -> path().filename() << endl;
+			//string suffix (".nr");
+			string file = dir_itr->path().filename();
+			//file.replace(file.find(suffix), suffix.length(), "");
+			ifstream r ( (exprDirSplit + argv[1] + "/" + file).c_str(), ifstream::in );
+			r >> skipws;
+			while(r.good())
+			{
+				tscKeyT pos;
+				double norm;
+				double raw;
+				char str;
+				string chrom;
+				r >> chrom >> str >> pos >> raw >> norm;
+				allTSCs[pos].expr[file].norm = norm;
+				allTSCs[pos].expr[file].raw	 = raw;
+				allTSCs[pos].beg = pos;
+				allTSCs[pos].end = pos;
+				allTSCs[pos].repr = pos;
+			}
+			r.close();
+			r.open( (mappedDir + file).c_str() );
+			r >> total[nSamples];
+			r.close();
+			nSamples ++;
+		}
+	}
+	cerr << nSamples << " samples read" << endl;
+	// build a sorted list of the TSCs
+
+	int nTSS = allTSCs.size();
+	cerr << nTSS << " TSSs read" << endl;
+	int *allPositions = new int[nTSS];
+	int nUsedTSS=0;
+	BOOST_FOREACH(tscHashT::value_type elem, allTSCs)
+	{
+		double totTpm = 0.0;
+		BOOST_FOREACH(exprHashT::value_type elem2, elem.second.expr)
+		{
+			totTpm += elem2.second.norm;
+		}
+		if(totTpm >= nSamples * 0) // if it passes the cutoff of expression
+		{
+			allPositions[nUsedTSS++] = elem.first; // that is the position, which is a key.
+		}
+	}
+	cerr << "Sorting positions" << endl;
+	qsort(allPositions, nUsedTSS, sizeof(int), cmpInt);
+	cerr << "Initializing" << endl;
+	list<TSC*> workTSCs;
+	for(int i = 0; i < nUsedTSS; ++i )
+	{
+		workTSCs.push_back(&allTSCs[allPositions[i]]); // I hope we are pushing an address of a real object, and not a copy
+	}
+	// do the clustering ..........................
+	list<double> workProbpairs; // keeps probabilities to cluster
+	list<double>::iterator itMaxProb = workProbpairs.begin();
+	list<TSC*>::iterator it = workTSCs.begin();
+
+	for(int i=0; i < nUsedTSS-1; i++)
+	{
+		double priorRatio =  priorprob(it);
+		double likelihoodRatio = altprofprob(it);
+		double p = priorRatio + likelihoodRatio;
+		workProbpairs.push_back( p );
+		//cout << priorRatio << '\t' << likelihoodRatio << '\t' << ((*(it+1))->beg - (*it)->end) << '\n' ;
+		//sleep(1);
+		it++;
+		if(p > *itMaxProb)
+		{
+			itMaxProb = workProbpairs.end();
+		}
+	}
+	cerr << "Max p = " << *itMaxProb << endl;
+	cerr << "Entering the clustering loop" << endl;
+	// get the clustering curve...
+	int nTSC = nUsedTSS;
+	while(nTSC > 2)
+	{
+		cerr << (nTSC % 100000) << endl;
+		if(!(nTSC % 100000))
+		{
+			cerr << "Clusters left " << nTSC << endl;
+		}
+		// find the best pair; naive linear search
+		if(workTSCs.size() != workProbpairs.size()+1)
+		{
+			cerr << "discrepancy! " << workTSCs.size() << " " << (workProbpairs.size()+1) << endl;
+			exit(1);
+		}
+		it = workTSCs.begin();
+		list<double>::iterator itProb = workProbpairs.begin();
+		list<TSC*>::iterator itBestTSC = it;
+		itMaxProb = itProb;
+		int i = 0;
+		for( i=0; i < nTSC -1; i++) // this can be while(it != workTSCs.end())
+		{
+			if(*itProb > *itMaxProb)
+			{
+				itMaxProb = itProb;
+				itBestTSC = it;
+			}
+			it ++;
+			itProb ++;
+		}
+		// fuse it
+		if(isinf(*itMaxProb))
+		{
+			cerr << "queue size " << workProbpairs.size() << " our element is " << i << endl;
+			cerr << "tsc queue " << workTSCs.size() << endl;
+		}
+		if(*itMaxProb <= 0)
+		{
+			//printClusters(workTSCs, "L2");
+			//return(0);
+		}
+		list<TSC*>::iterator nextTSC = itBestTSC;
+		nextTSC++;
+		cout << "Fusing:\t" << *itMaxProb << '\t' << ((*nextTSC)->end - (*itBestTSC)->beg) << '\t' << (*itBestTSC)->beg << '\n';
+
+		**itBestTSC += **(nextTSC); // fusion
+		if(nextTSC == workTSCs.end())
+		{
+			cerr << "dupa" << endl; exit(1);
+		}
+		//cout << (*itBestTSC)->beg << " " << (*itBestTSC)->end << endl;
+		workTSCs.erase(nextTSC);  // this always exists, doesn't invalidate the iterator
+		// update the neighbouring fusion probabilities
+		if(itMaxProb != workProbpairs.begin())
+		{
+			//cerr << "Left pair update" << endl;
+			if(itBestTSC == workTSCs.begin())
+			{
+				cerr << "GGG" << endl;
+				cout << (*itBestTSC)->beg << " " << (*itBestTSC)->end << endl;
+				//cerr << workProbpairs.front() << " " << workProbpairs[1] << " " << workProbpairs[2] << " " << workTSCs.size() << " " << workProbpairs.size() << endl;
+				//cerr << (*workTSCs.begin())->beg << " " << (*workTSCs.begin())->end << " " << (workTSCs[1])->beg << " " << workTSCs[1]->end << endl;
+
+				exit(1);
+			}
+			itBestTSC --;
+			workProbpairs.erase(itMaxProb);
+			itMaxProb --;
+			double priorRatio =  priorprob(itBestTSC);
+			double likelihoodRatio = altprofprob(itBestTSC);
+			if(isnan(priorRatio))
+			{
+				cerr << "AAA";
+			}
+			if(isnan(likelihoodRatio))
+			{
+				cerr << "BBB";
+			}
+			*itMaxProb = priorRatio + likelihoodRatio;
+			itMaxProb ++;
+			if(itMaxProb != workProbpairs.end())
+			{
+				//cerr << "Right pair update" << endl;
+				itBestTSC++;
+				double priorRatio =  priorprob(itBestTSC);
+				double likelihoodRatio = altprofprob(itBestTSC);
+				if(isnan(priorRatio))
+							{
+								cerr << "CCC";
+							}
+							if(isnan(likelihoodRatio))
+							{
+								cerr << "DDD";
+
+							}
+				*itMaxProb = priorRatio + likelihoodRatio;
+			}
+		}
+		else
+		{
+			// we are erasing the first element
+			cerr << "this if first element handling" << endl;
+			workProbpairs.pop_front();
+			double priorRatio =  priorprob(workTSCs.begin());
+			double likelihoodRatio = altprofprob(workTSCs.begin());
+			if(isnan(priorRatio))
+						{
+							cerr << "EEE";
+						}
+						if(isnan(likelihoodRatio))
+						{
+							cerr << "FFF";
+						}
+			workProbpairs.front() = priorRatio + likelihoodRatio;  // loop nTSC > 1 guarantees there is a second TSC to the right
+		}
+		nTSC --;
+	}
+
+	delete allPositions;
+	return 0;
+}
+
+double altprofprob(list<TSC*>::iterator it)
+// we might remove the second one in case we only want to cluster i and i+1...
+{
+	TSC* segone = *it;
+	it++;
+	TSC* segtwo = *it;
+	//double meandel = 0;
+	//double vardel = 0;
+	//int numexpress = 0;
+	//int numone = 0;
+	double Lindep, L, avwzz, avwz, avw;
+	double avgamma, avgammarho, avgammarhorho, avgammasig, avgammasigsig, avgammarhosig;
+	double betax, betay, avbetax, avbetay, avbetax_xx, avbetay_yy, avbetax_x, avbetay_y;
+	//double pos, posx, posy;
+	L = 0;
+	Lindep = 0;
+
+	avwzz = 0;
+	avwz = 0;
+	avgamma = 0;
+	avw = 0;
+	avgammarho = 0;
+	avgammarhorho = 0;
+	avgammasigsig = 0;
+	avgammasig = 0;
+	avgammarhosig = 0;
+
+	betax = 0;
+	betay = 0;
+	avbetax = 0;
+	avbetay = 0;
+	avbetax_xx = 0;
+	avbetay_yy = 0;
+	avbetax_x = 0;
+	avbetay_y = 0;
+
+	// go over all the samples in which we have expression of the first TSC
+	// and check if we have also expression in the second
+	// if true, then do the calculations.
+	int pos = 0; // keeps the number of used samples
+	//cout << "comparing " << segone->repr << " and " << segtwo->repr << endl;
+	BOOST_FOREACH(exprHashT::value_type pair, segone->expr)
+	{
+		string sample = pair.first;
+		//cout << sample << '\t';
+		if(segtwo->expr.find(pair.first) != segtwo->expr.end())
+		{
+			//cout << "M";
+			double n = segone->expr[sample].raw;
+			double m = segtwo->expr[sample].raw;
+			double nnor = segone->expr[sample].norm;
+			double mnor = segtwo->expr[sample].norm;
+			// here can be some pseudocounts
+			pos++;
+			double x = log(nnor + normPseudocount);
+			double y = log(mnor + normPseudocount);
+			double z = x - y;
+			double s = 0.5 * (x + y);
+			double wx = 1 / (sigmasq + 1.0 / n);
+			double wy = 1 / (sigmasq + 1.0 / m);
+			double w = wx * wy * (1.0 + alpha / (wx + wy)) / (wx + wy + alpha);
+			double rho = 0.5 * (wx - wy) / (wx + wy);
+			double sig = s + rho * z;
+			double gamma = alpha * (wx + wy) / (wx + wy + alpha);
+
+			avwzz += w * z * z;
+			avwz += w * z;
+			avgammasigsig += gamma * sig * sig;
+			avgammasig += gamma * sig;
+			avgamma += gamma;
+			avw += w;
+			avgammarho += gamma * rho;
+			avgammarhorho += gamma * rho * rho;
+			avgammarhosig += gamma * rho * sig;
+
+			L += 0.5 * log(wx * wy * alpha / (wx + wy + alpha));
+
+			double betax = alpha * wx / (alpha + wx);
+			double betay = alpha * wy / (alpha + wy);
+			avbetax += betax;
+			avbetay += betay;
+			avbetax_xx += betax * x * x;
+			avbetay_yy += betay * y * y;
+			avbetax_x += betax * x;
+			avbetay_y += betay * y;
+
+			Lindep += 0.5 * log(betax * betay);
+		}
+	}
+	/**normalize all the averages****/
+	//cout << endl;
+	if(pos > 0)
+	{
+		avwzz /= ((double) pos);
+		avw /= ((double) pos);
+		avwz /= ((double) pos);
+		avgamma /= ((double) pos);
+		avgammasig /= ((double) pos);
+		avgammasigsig /= ((double) pos);
+		avgammarho /= ((double) pos);
+		avgammarhorho /= ((double) pos);
+		avgammarhosig /= ((double) pos);
+
+		avbetax /= ((double) pos);
+		avbetay /= ((double) pos);
+		avbetax_x /= ((double) pos);
+		avbetay_y /= ((double) pos);
+		avbetax_xx /= ((double) pos);
+		avbetay_yy /= ((double) pos);
+
+		/***contribution from the prefactor***/
+		L -= 0.5 * log( avgamma * avw + avgamma * avgammarhorho - avgammarho * avgammarho);
+		/**Note the 1/Nsamp, the 2pi's,  and the 1/(mumax-mumin) will cancel between dependent and independent model***/
+
+		/***Expression in the exponent of the dependent model***/
+		double Q = avwzz + avgammasigsig - avgammasig * avgammasig / avgamma;
+		Q -= (avwz + avgammarhosig - avgammarho * avgammasig / avgamma) * (avwz + avgammarhosig - avgammarho * avgammasig / avgamma) / (avw + avgammarhorho - avgammarho * avgammarho / avgamma);
+
+		L -= 0.5 * ((double) pos) *  Q;
+
+		/***Now contribution from independent model***/
+		Lindep -= 0.5 * ((double) pos) * (avbetax_xx - (avbetax_x * avbetax_x / avbetax));
+		Lindep -= 0.5 * ((double) pos) * (avbetay_yy - (avbetay_y * avbetay_y / avbetay));
+		Lindep -= 0.5 * log( avbetax * avbetay);
+
+		/***Difference between the log-likelihoods***/
+		L -= Lindep;
+	}
+	else
+	{
+		L = 0;
+	}
+	//cerr << "Returning " << L << endl;
+	if(L != L) //(L == numeric_limits<double>::infinity())
+	{
+		cerr << "oops: we produced inf in altprofprob\n";
+		cerr << "pos = " << pos << " Lindep = " << Lindep << " x = " << avbetax << " y " << avbetay
+				<< " x_xx " << avbetax_xx << " y_yy " << avbetay_yy << " x_x " << avbetax_x << " y_y" << avbetay_y << endl;
+
+		exit(1);
+	}
+	return L;
+}
+ /*
+
+	for(i = 0; i < nSamples; ++i) // over samples
+	{
+		string sample = samples[i];
+		n = segone->expr[sample].norm;
+		m = segtwo->expr[sample].norm;
+
+		if(n >= 1 || m >= 1 )
+		{
+			++pos;
+
+			nnor = segone->normprofile[i];
+			mnor = segtwo->normprofile[i];
+			if(n < 1)
+			{
+				n = 1;
+				nnor += 0.5 * 1000000.0 / (tottag[i] + 1.0);
+			}
+			else
+			{
+				++posx;
+			}
+
+			if(m < 1)
+			{
+				m = 1;
+				mnor += 0.5 * 1000000.0 / (tottag[i] + 1.0);
+			}
+			else
+			{
+				++posy;
+			}
+
+			x = log(nnor);
+			y = log(mnor);
+			z = x - y;
+			s = 0.5 * (x + y);
+			wx = 1 / (sigmasq[i] + 1.0 / n);
+			wy = 1 / (sigmasq[i] + 1.0 / m);
+			w = wx * wy * (1.0 + alpha / (wx + wy)) / (wx + wy + alpha);
+			rho = 0.5 * (wx - wy) / (wx + wy);
+			sig = s + rho * z;
+			gamma = alpha * (wx + wy) / (wx + wy + alpha);
+
+			avwzz += w * z * z;
+			avwz += w * z;
+			avgammasigsig += gamma * sig * sig;
+			avgammasig += gamma * sig;
+			avgamma += gamma;
+			avw += w;
+			avgammarho += gamma * rho;
+			avgammarhorho += gamma * rho * rho;
+			avgammarhosig += gamma * rho * sig;
+
+			L += 0.5 * log( wx * wy * alpha / (wx + wy + alpha));
+
+			betax =  alpha * wx / (alpha + wx);
+			betay =  alpha * wy / (alpha + wy);
+			avbetax += betax;
+			avbetay += betay;
+			avbetax_xx += betax * x * x;
+			avbetay_yy += betay * y * y;
+			avbetax_x += betax * x;
+			avbetay_y += betay * y;
+
+			Lindep += 0.5 * log(betax * betay);
+		}
+	}
+	//normalize all the averages
+	if(pos > 0)
+	{
+		avwzz /= ((double) pos);
+		avw /= ((double) pos);
+		avwz /= ((double) pos);
+		avgamma /= ((double) pos);
+		avgammasig /= ((double) pos);
+		avgammasigsig /= ((double) pos);
+		avgammarho /= ((double) pos);
+		avgammarhorho /= ((double) pos);
+		avgammarhosig /= ((double) pos);
+
+		avbetax /= ((double) pos);
+		avbetay /= ((double) pos);
+		avbetax_x /= ((double) pos);
+		avbetay_y /= ((double) pos);
+		avbetax_xx /= ((double) pos);
+		avbetay_yy /= ((double) pos);
+
+		//contribution from the prefactor
+		L -= 0.5 * log( avgamma * avw + avgamma * avgammarhorho - avgammarho * avgammarho);
+		//Note the 1/Nsamp, the 2pi's,  and the 1/(mumax-mumin) will cancel between dependent and independent model
+
+		//Expression in the exponent of the dependent model
+		Q = avwzz + avgammasigsig - avgammasig * avgammasig / avgamma;
+		Q -= (avwz + avgammarhosig - avgammarho * avgammasig / avgamma) * (avwz + avgammarhosig - avgammarho * avgammasig / avgamma) / (avw + avgammarhorho - avgammarho * avgammarho / avgamma);
+
+		L -= 0.5 * ((double) pos) *  Q;
+
+		//Now contribution from independent model
+		Lindep -= 0.5 * ((double) pos) * (avbetax_xx - (avbetax_x * avbetax_x / avbetax));
+		Lindep -= 0.5 * ((double) pos) * (avbetay_yy - (avbetay_y * avbetay_y / avbetay));
+		Lindep -= 0.5 * log( avbetax * avbetay);
+
+		//Difference between the log-likelihoods
+		L -= Lindep;
+	}
+	else
+	{
+		L = 0;
+	}
+	return L;
+}
+*/
+
+/**prior probability for fusing segments depending on their distance***/
+double priorprob(list<TSC*>::iterator it)
+{
+	TSC* segone = *it;
+	it++;
+	TSC* segtwo = *it;
+	if ((void*)segone == (void*)segtwo)
+	{
+		cerr << "Comparing same objects!" << endl;
+	}
+	int dist = segtwo->beg - segone->end ;
+	//cout << "Distance " << dist << endl;
+	/***test use instead distances between representative positions***/
+	/*dist = segtwo->reppos-segone->reppos+1;*/
+	double prior = -((double) dist) / 30.0;
+	prior -= log(1.0 - exp(prior));
+	if(isnan(prior))
+	{
+		cerr << "NAN prior\n" << endl;
+		exit(1);
+	}
+	if(isinf(prior))
+		{
+			cerr << "INF prior, while dist = " << dist << endl;
+			cerr << segone->beg << " " << segone->end << " " << segtwo->beg << " " << segtwo->end << endl;
+			exit(1);
+		}
+	return prior;
+}
+// these formulas work
+// 304*0.48 * exp(-x/30)  // fits the positive part roughly
+// 304*0.75* exp(-x/70) - 0.3*304  // fits quite good apart from the 1
+
+double priorprobEmpirical(TSC *segone, TSC *segtwo)
+{
+	int dist = segtwo->beg - segone->end ;
+	if(dist < 1)
+	{
+		cerr << "Distance between TSCs is too small (=" << dist << ")\n";
+		exit(1);
+	}
+	if(dist == 1)
+	{
+		return nSamples * 0.63;
+	}
+	else
+	{
+		return nSamples * 0.75 * exp(-(double)dist / 70.0) - 0.3 * nSamples;
+	}
+}
+
+void printClusters(list<TSC*> &result, char* fileName)
+{
+	ofstream out(fileName);
+	for(list<TSC*>::iterator it = result.begin(); it != result.end(); it++)
+	{
+		out << (*it);
+	}
+	out.close();
+}

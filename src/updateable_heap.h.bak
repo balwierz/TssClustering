@@ -1,0 +1,227 @@
+/*
+ * updatable_heap.h
+ *
+ *  Created on: May 14, 2011
+ *      Author: balwierz
+ */
+
+#ifndef UPDATABLE_HEAP_H_
+#define UPDATABLE_HEAP_H_
+
+#include <ostream>
+#include "TSC.h"
+#include <list>
+
+template<class dataT> class updateable_heap;
+template<class dataT>
+ostream& operator<<(ostream &str, updateable_heap<dataT> &h);
+
+template<class dataT> class updateable_heap
+{
+	vector<dataT> tab;
+	unsigned int s;
+	dataT tmp;
+public:
+	void upheap(unsigned int);
+	void downheap(unsigned int);
+	void update(unsigned int, dataT);
+	void updated(unsigned int);
+	dataT peek();
+	void erase(unsigned int);
+	dataT pop();
+	void push(dataT);
+	//updateable_heap(vector<dataT> &srcV);
+	updateable_heap()
+	{
+		s = 0;
+		dataT foo; // whatever, we don't use the element zero
+		tab.push_back(foo);
+	}
+	unsigned int size()
+	{
+		return s;
+	}
+	friend ostream& operator<<<dataT>(ostream &str, updateable_heap<dataT> &h); // I don't know why I needed such a declaration
+};
+
+class heapElemT
+{
+public:
+	list<TSC*>::iterator left;
+	heapElemT(list<TSC*>::iterator a)
+	{
+		left = a;
+	}
+	heapElemT()
+	{
+		//left = list<TSC*>::iterator(); // hope it is fine.
+	}
+	void operator==(const unsigned int &pos)
+	{
+		(*left)->posInHeap = pos;
+	}
+};
+
+ostream& operator<<(ostream &str, heapElemT he);
+int operator>(heapElemT a, heapElemT b);
+
+template<class dataT>
+ostream& operator<<(ostream &str, updateable_heap<dataT> &h)
+{
+	for(unsigned int i=1; i<=h.s; ++i)
+	{
+		str << h.tab[i] << "\t";
+	}
+	str << '\n';
+	return str;
+}
+
+template<class dataT>
+dataT updateable_heap<dataT>::pop()
+{
+	//cerr << "POP" << endl;
+	dataT ret = tab[1];
+	tab[1] = tab[s--];
+	tab[1] == 1;
+	downheap(1);
+	return ret;
+}
+
+template<class dataT> void updateable_heap<dataT>::push(dataT elem)
+{
+	tab.push_back(elem);
+	++s;
+	elem == s;
+	upheap(s);
+}
+
+template<class dataT> void updateable_heap<dataT>::downheap(unsigned int pos)
+{
+	register unsigned int leftKidPos = pos << 1;
+	register unsigned int toChangePos = pos;
+	if(s >= leftKidPos) // exists left
+	{
+		if(tab[leftKidPos] > tab[pos])
+		{
+			toChangePos = leftKidPos;
+		}
+		if(s > leftKidPos) // exists right
+		{
+			leftKidPos ++; // now it is RIGHT
+			if(tab[leftKidPos] > tab[toChangePos])
+			{
+				toChangePos = leftKidPos;
+			}
+		}
+		// execute it
+		if(pos != toChangePos)
+		{
+			//cout << "Exchanging " << tab[pos] << " <-> " << tab[toChangePos] << endl;
+			tmp = tab[pos];
+			tab[pos] = tab[toChangePos];
+			tab[toChangePos] = tmp;
+			downheap(toChangePos);
+			tab[pos] == pos;
+			tab[toChangePos] == toChangePos;
+		}
+	}
+}
+
+template<class dataT> void updateable_heap<dataT>::upheap(unsigned int pos)
+{
+	register int parent = pos >> 1;
+	if(parent)
+	{
+		if(tab[pos] > tab[parent])
+		{
+			//cerr << "Upheap ex: " << pos << " " << parent << endl;
+			tmp = tab[pos];
+			tab[pos] = tab[parent];
+			tab[parent] = tmp;
+			tab[pos] == pos;
+			tab[parent] == parent;
+			upheap(parent);
+		}
+	}
+}
+
+template<class dataT> void updateable_heap<dataT>::update(unsigned int pos, dataT newVal)
+{
+	tab[pos] = newVal;
+	upheap(pos);	// only one up to one of these statements will
+	downheap(pos); 	// make some changes to the structure.
+}
+
+template<class dataT> void updateable_heap<dataT>::updated(unsigned int pos)
+{
+	//cerr << "Heap size " << s << " " << this->tab.size() << " " << pos << endl;
+	upheap(pos);	// only one up to one of these statements will
+	downheap(pos); 	// make some changes to the structure.
+}
+
+template<class dataT> dataT updateable_heap<dataT>::peek()
+{
+	return tab[1];
+}
+
+template<class dataT> void updateable_heap<dataT>::erase(unsigned int pos)
+{
+	tab[pos] = tab[s--];
+	tab[pos] == pos;
+	updated(pos);
+}
+
+//template<class dataT> void updateable_heap<dataT>::updateable_heap(vector<dataT> &srcV)
+//{
+//	assert(0); // not implemented
+//}
+
+/*
+void testHeap()
+{
+	updateable_heap<double> h;
+	//for(int i=0; i<100; i++)
+	//{
+	//	h.push(rand() % 1000);
+	//}
+	//cout << h;
+//	h.push(7.1);
+//	cout << h;
+//	h.push(15.1);
+//	cout << h;
+//	h.push(16.1);
+//	cout << h;
+//	h.push(11.1);
+//	cout << h;
+//	h.push(5.1);
+//	cout << h;
+//	h.push(5.1);
+//	cout << h;
+	//cout << "Messing up\n";
+	//for(int i=0; i<1000; i++)
+	//{
+
+	//	h.update((unsigned)i%100 + 1, rand() % 1000);
+	//}
+	h.update((unsigned)1, 8.2);
+	h.update((unsigned)1, 9.1);
+	h.update((unsigned)6, 2.2);
+	h.update((unsigned)3, 4.2);
+	h.update((unsigned)5, 5.2);
+	h.update((unsigned)2, 10.2);
+	//cout << h;
+	while(h.size())
+	{
+		//cout << "aaa " << h.pop() << endl;
+	}
+}
+*/
+
+
+
+
+//ostream& operator<<(ostream &str, heapElemT he);
+//int operator>(heapElemT a, heapElemT b);
+
+
+#endif /* UPDATABLE_HEAP_H_ */
